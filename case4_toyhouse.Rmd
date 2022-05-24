@@ -1,0 +1,192 @@
+---
+title: "case_4_toyhouse"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+rm(list = ls())
+setwd("/Users/rookie/Desktop/SpringA Read 2/summer/analytic design/case4")
+load("GBA424 - Toy Horse Case Data.Rdata")
+require("cluster")
+library(cluster)
+library(fpc)
+library(factoextra)
+library(gridExtra)
+library(reshape)
+```
+
+
+```{r}
+##aggregate regression
+summary(lm(ratings~price+size+motion+style, data=conjointData))
+##use regression to fill the data 
+newConjointData=conjointData
+new_training = newConjointData[!(is.na(newConjointData$ratings)),]
+new_missing = newConjointData[is.na(newConjointData$ratings),]
+numIDs = length(unique(conjointData$ID))
+partworths1 = data.frame(ID=1:numIDs, intercept = NA, price=NA, size=NA, motion=NA, style =NA)
+newPredict=list()
+```
+
+```{r}
+##store coefficients in partworths for cluster test
+for(num in 1:numIDs){
+  newTrainingSub=subset(new_training,ID==num)
+  newMissingSub=subset(new_missing,ID==num)
+  lm=lm(ratings~price+size+motion+style,data=newTrainingSub)
+  partworths1[num,2:6]=lm$coefficients
+  newPredict = append(newPredict,predict(lm,newMissingSub))
+  
+}
+newConjointData$ratings[is.na(newConjointData$ratings)]=unlist(newPredict)
+```
+
+```{r}
+set.seed(123456)  
+toClust =partworths1
+##source with clustercode provided in class
+source(file.choose())
+checkClust = clustTest(partworths1[,2:6],print=TRUE,scale=TRUE,maxClusts=10,seed=12345,nstart=20,iter.max=100)
+clusts = runClusts(partworths1[,2:6],c(2,3,4,5),print=TRUE,maxClusts=4,seed=12345,nstart=20,iter.max=100)
+##optimal cluster is 3 according to the average silhouette width results, and the three clusters are the most ##separated
+partworths1_seg = as.data.frame(clusts[[1]][[2]]$centers)
+partworths1_seg
+## segment one: lower price, tall size, bouncing, racing--profile 4
+## segment two: lower price, tall size, rocking, glamour--profile 16
+## segment three: lower price, small size, bouncing, glamour--profile 10
+
+```
+
+
+```{r}
+##priori segmentation
+conjoint_merge<-merge(conjointData, respondentData, by.x="ID",by.y="ID",all.x = TRUE)
+summary(lm(ratings~(price+size+motion+style)*age, data=conjoint_merge))
+##We found no significant interaction effect by age, hence age is not an important segementation variable to consider
+summary(lm(ratings~(price+size+motion+style)*gender, data=conjoint_merge))
+##We found all significant interaction effect by gender, except the size variable
+subsetGirls<-conjoint_merge[conjoint_merge$gender==1,]
+subsetBoys<-conjoint_merge[conjoint_merge$gender==0,]
+summary(lm(ratings~price+size+motion+style, data=subsetGirls))
+summary(lm(ratings~price+size+motion+style, data=subsetBoys))
+
+##segment 1 for girls : lower price, tall size, bouncing, glamour--profile 2
+##segment 2 for boys: lower price, small size, bouncing, racing--profile 12
+```
+
+```{r}
+## market simulation
+
+ratingData = cast(newConjointData, ID~profile, value="ratings")
+ratingData = ratingData[, -1]
+
+simFCSharesTie = function(scen,data,ascend=FALSE){
+  inmkt = data[,scen]
+  if(ascend){
+    bestOpts = apply(inmkt,1,min)
+  } else {
+    bestOpts = apply(inmkt,1,max)
+  }
+  decisions = inmkt == bestOpts
+  decisionsTie = decisions / rowSums(decisions)
+  mkShare = colSums(decisionsTie)/sum(decisionsTie)
+  mkShare
+}
+```
+
+```{r}
+##set up scen 
+scens = list()
+scens[[1]]=c(5,13,7)
+scens[[2]]=c(4,16,7)
+scens[[3]]=c(4,16,8)
+scens[[4]]=c(4,10,7)
+scens[[5]]=c(4,10,8)
+scens[[6]]=c(2,12,7)
+scens[[7]]=c(2,12,8)
+scens[[8]]=c(2,16,7)
+scens[[9]]=c(2,16,8)
+
+##market share
+sapply(scens,simFCSharesTie,data=ratingData, ascend=FALSE)
+##in scenarios 2, 4,6,8, the competitors' market shares have decreased significantly, so we assume he would definitely decrease his price from 7 to 8
+##calculate profit with 1,3,5,7,9
+variableCost = profilesData
+variableCost$varCost[variableCost$size==0 & variableCost$motion==1] = 33 # 18" Rocking
+variableCost$varCost[variableCost$size==1 & variableCost$motion==1] = 41 # 26" Rocking
+variableCost$varCost[variableCost$size==0 & variableCost$motion==0] = 21 # 18" Bouncing
+variableCost$varCost[variableCost$size==1 & variableCost$motion==0] = 29 # 26" Bouncing
+
+```
+
+```{r}
+profitFun = function(scen, data, year=1) {
+  marketShares = simFCSharesTie(scen, data, ascend=FALSE)
+  EarlyProducts = scen[-length(scen)] # exclude competitor's share
+  EarlyMarketShare = marketShares[1:length(EarlyProducts)]
+  quantity = EarlyMarketShare*4000
+  price = profilesData$priceLabel[profilesData$profile %in% EarlyProducts]*0.8
+  varCost = variableCost$varCost[variableCost$profile %in% EarlyProducts]
+  fixCost = 20000*length(EarlyProducts)*year+sum(!(EarlyProducts %in% c(5,6,13,14)))*7000
+  margin = (price-varCost)*quantity
+  profit = sum(margin)*year - fixCost
+  results = list(profit, margin)
+  results
+}
+
+profitFunCompetitor = function(scen, data, year=1) {
+  marketShares = simFCSharesTie(scen, data, ascend=FALSE)
+  CompetitorProduct = scen[length(scen)]
+  CompetitorMarketShare = marketShares[length(scen)]
+  CompetitorQuantity = CompetitorMarketShare*4000
+  priceC = profilesData$priceLabel[profilesData$profile %in% CompetitorProduct]*0.8
+  varCostC =variableCost$varCost[variableCost$profile %in% CompetitorProduct]
+  fixCostC = 20000*length(CompetitorProduct)*year+sum(!(CompetitorProduct %in% c(5,6,13,14)))*7000
+  marginC = (priceC-varCostC)*CompetitorQuantity
+  profitC = sum(marginC)*year - fixCostC
+  resultsC = list(profitC, marginC)
+  resultsC
+}
+
+productMarginCompetitor = lapply(scens[c(1,3,5,7,9)],function(x)profitFunCompetitor(x,data=ratingData,year=1)[[2]])
+productMarginCompetitor
+
+productMargin = lapply(scens[c(1,3,5,7,9)],function(x) profitFun(x,data=ratingData,year=1)[[2]])
+productMargin
+```
+
+```{r}
+##calculate profit
+profitMatrix = matrix(nrow=10, ncol=5)
+colnames(profitMatrix) = c("scenario1","scenario3","scenario5","scenario7","scenario9")
+rownames(profitMatrix)=paste("year",1:10)
+for (year in 1:10) {
+  profitMatrix[year, ] = sapply(scens[c(1, 3, 5, 7, 9)],
+                              function (x) profitFun(x,
+                                                      data=ratingData,
+                                                      year=year)[[1]])
+}
+profitMatrix
+apply(profitMatrix, 1, which.max)
+## product 2,16 yield the biggest profit in both short term and long term
+
+##now let's calculate the competitors' profit in different scenarios
+profitMatrixCom =matrix(nrow=10,ncol=5)
+colnames(profitMatrixCom) = c("scenario1Competitor","scenario3Competitor","scenario5Competitor","scenario7Competitor","scenario9Competitor")
+rownames(profitMatrixCom)=paste("year",1:10)
+for (year in 1:10) {
+  profitMatrixCom[year, ] = sapply(scens[c(1, 3, 5, 7, 9)],
+                                function (x) profitFunCompetitor(x,
+                                                       data=ratingData,
+                                                       year=year)[[1]])
+}
+profitMatrixCom
+
+##scenario 9 yield the best profit in both short run and long run
+```
+
